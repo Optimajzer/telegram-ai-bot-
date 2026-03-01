@@ -1,206 +1,181 @@
-import asyncio
 import os
-from datetime import datetime
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from openai import AsyncOpenAI
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OWNER_ID = int(os.getenv("OWNER_ID"))
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher()
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
+# ====== USER STATES ======
+user_states = {}
 
-# =========================
-# СЦЕНАРНЫЕ СОСТОЯНИЯ
-# =========================
-
-class Scenario(StatesGroup):
-    project_name = State()
-    niche = State()
-    goal = State()
-    budget = State()
-    contact = State()
-
-
-# =========================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# =========================
-
-async def save_lead(data: dict):
-    with open("leads.txt", "a", encoding="utf-8") as f:
-        f.write(
-            f"\n--- {datetime.now()} ---\n"
-            f"Проект: {data.get('project_name')}\n"
-            f"Сфера: {data.get('niche')}\n"
-            f"Задача: {data.get('goal')}\n"
-            f"Бюджет: {data.get('budget')}\n"
-            f"Контакт: {data.get('contact')}\n"
-        )
-
-
-async def ask_ai(message: str):
-    response = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты профессиональный консультант по разработке Telegram-ботов "
-                    "и AI-решений для бизнеса. Отвечай кратко, по делу, уверенно. "
-                    "Без воды, без смайликов, без длинных текстов."
-                ),
-            },
-            {"role": "user", "content": message},
+# ====== KEYBOARD ======
+def main_keyboard():
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🧠 Консультация")],
+            [KeyboardButton(text="💬 Свободный режим")]
         ],
-        temperature=0.7,
+        resize_keyboard=True
     )
+    return kb
 
-    return response.choices[0].message.content
-
-
-def looks_like_scenario_answer(text: str):
-    # простая проверка — короткий конкретный ответ
-    if len(text) > 150:
-        return False
-    if "?" in text:
-        return False
-    return True
-
-
-# =========================
-# СТАРТ
-# =========================
-
+# ====== START ======
 @dp.message(Command("start"))
-async def start_handler(message: Message, state: FSMContext):
-    await state.set_state(Scenario.project_name)
-    await state.update_data(mode="scenario")
+async def start(message: types.Message):
+    user_states[message.from_user.id] = {
+        "mode": "consultation",
+        "step": "project_name",
+        "data": {}
+    }
 
     await message.answer(
         "Здравствуйте.\n\n"
-        "Я помогаю предпринимателям создавать Telegram-ботов для бизнеса.\n\n"
-        "Ответьте на несколько коротких вопросов, чтобы я понял вашу задачу.\n\n"
-        "Как называется ваш проект или компания?"
+        "Я помогаю предпринимателям внедрять Telegram-ботов для бизнеса.\n\n"
+        "Чтобы предложить вам подходящее решение, задам несколько коротких вопросов.\n\n"
+        "Как называется ваш проект или компания?",
+        reply_markup=main_keyboard()
     )
 
-
-# =========================
-# СЦЕНАРИЙ
-# =========================
-
-@dp.message(Scenario.project_name)
-async def get_project_name(message: Message, state: FSMContext):
-    if not looks_like_scenario_answer(message.text):
-        await switch_to_ai(message, state)
-        return
-
-    await state.update_data(project_name=message.text)
-    await state.set_state(Scenario.niche)
+# ====== MODE SWITCH ======
+@dp.message(lambda m: m.text == "🧠 Консультация")
+async def consultation_mode(message: types.Message):
+    user_states[message.from_user.id] = {
+        "mode": "consultation",
+        "step": "project_name",
+        "data": {}
+    }
 
     await message.answer(
-        "В какой сфере работает ваш бизнес?"
+        "Отлично.\n\nНачнём с базовой информации.\n\n"
+        "Как называется ваш проект или компания?",
+        reply_markup=main_keyboard()
     )
 
-
-@dp.message(Scenario.niche)
-async def get_niche(message: Message, state: FSMContext):
-    if not looks_like_scenario_answer(message.text):
-        await switch_to_ai(message, state)
-        return
-
-    await state.update_data(niche=message.text)
-    await state.set_state(Scenario.goal)
+@dp.message(lambda m: m.text == "💬 Свободный режим")
+async def free_mode(message: types.Message):
+    user_states[message.from_user.id] = {
+        "mode": "free"
+    }
 
     await message.answer(
-        "Какую задачу должен решать бот?"
+        "Вы в свободном режиме.\n\n"
+        "Можете задать любой вопрос.",
+        reply_markup=main_keyboard()
     )
 
+# ====== EXIT DETECTION ======
+def is_exit_from_scenario(text: str):
+    triggers = ["сколько", "цена", "как", "что если", "?"]
+    if len(text.split()) > 15:
+        return True
+    for t in triggers:
+        if t in text.lower():
+            return True
+    return False
 
-@dp.message(Scenario.goal)
-async def get_goal(message: Message, state: FSMContext):
-    if not looks_like_scenario_answer(message.text):
-        await switch_to_ai(message, state)
-        return
+# ====== TOXIC FILTER ======
+def is_toxic(text: str):
+    bad_words = ["иди нах", "пошел", "долбо", "еба", "бля"]
+    return any(word in text.lower() for word in bad_words)
 
-    await state.update_data(goal=message.text)
-    await state.set_state(Scenario.budget)
-
-    await message.answer(
-        "Планируете ли вы бюджет на разработку? "
-        "Можно указать диапазон."
-    )
-
-
-@dp.message(Scenario.budget)
-async def get_budget(message: Message, state: FSMContext):
-    if not looks_like_scenario_answer(message.text):
-        await switch_to_ai(message, state)
-        return
-
-    await state.update_data(budget=message.text)
-    await state.set_state(Scenario.contact)
-
-    await message.answer(
-        "Оставьте контакт для связи (Telegram или номер)."
-    )
-
-
-@dp.message(Scenario.contact)
-async def get_contact(message: Message, state: FSMContext):
-    if not looks_like_scenario_answer(message.text):
-        await switch_to_ai(message, state)
-        return
-
-    data = await state.get_data()
-    data["contact"] = message.text
-
-    await save_lead(data)
-    await state.clear()
-
-    await message.answer(
-        "Благодарю.\n\n"
-        "Я изучу информацию и свяжусь с вами для обсуждения деталей."
-    )
-
-
-# =========================
-# ПЕРЕКЛЮЧЕНИЕ В AI
-# =========================
-
-async def switch_to_ai(message: Message, state: FSMContext):
-    await state.clear()
-    response = await ask_ai(message.text)
-    await message.answer(response)
-
-
-# =========================
-# AI РЕЖИМ
-# =========================
-
+# ====== MAIN HANDLER ======
 @dp.message()
-async def ai_handler(message: Message):
-    response = await ask_ai(message.text)
-    await message.answer(response)
+async def handle_message(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text
 
+    # Toxic handling
+    if is_toxic(text):
+        await message.answer(
+            "Давайте общаться конструктивно. Я здесь, чтобы помочь вам."
+        )
+        return
 
-# =========================
-# ЗАПУСК
-# =========================
+    state = user_states.get(user_id)
+
+    if not state:
+        user_states[user_id] = {"mode": "free"}
+        state = user_states[user_id]
+
+    # FREE MODE
+    if state.get("mode") == "free":
+        response = await ask_ai(text)
+        await message.answer(response)
+        return
+
+    # CONSULTATION MODE
+    if state.get("mode") == "consultation":
+
+        if is_exit_from_scenario(text):
+            user_states[user_id]["mode"] = "free"
+            await message.answer(
+                "Похоже, вы задали отдельный вопрос.\n\n"
+                "Перехожу в свободный режим."
+            )
+            response = await ask_ai(text)
+            await message.answer(response)
+            return
+
+        step = state.get("step")
+
+        if step == "project_name":
+            state["data"]["project_name"] = text
+            state["step"] = "sphere"
+            await message.answer("В какой сфере работает ваш бизнес?")
+            return
+
+        elif step == "sphere":
+            state["data"]["sphere"] = text
+            state["step"] = "goal"
+            await message.answer("Какую задачу должен решать бот?")
+            return
+
+        elif step == "goal":
+            state["data"]["goal"] = text
+            state["mode"] = "free"
+
+            summary = (
+                f"Спасибо.\n\n"
+                f"Проект: {state['data']['project_name']}\n"
+                f"Сфера: {state['data']['sphere']}\n"
+                f"Задача: {state['data']['goal']}\n\n"
+                f"Я подготовлю оптимальную концепцию решения."
+            )
+
+            await message.answer(summary)
+
+            ai_response = await ask_ai(
+                f"Предложи профессиональную концепцию Telegram-бота для бизнеса "
+                f"{state['data']['project_name']} в сфере {state['data']['sphere']} "
+                f"с задачей {state['data']['goal']}."
+            )
+
+            await message.answer(ai_response)
+            return
+
+# ====== OPENAI ======
+async def ask_ai(prompt):
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты профессиональный AI-консультант по внедрению Telegram-ботов."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content
+
 
 async def main():
-    print("AI-консультант запущен")
     await dp.start_polling(bot)
 
 
